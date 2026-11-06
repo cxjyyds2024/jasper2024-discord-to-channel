@@ -1,0 +1,21 @@
+{
+  "name": "koishi-plugin-jasper2024-discord-to-channel",
+  "description": "获取 Discord 的消息，并发送到指定的频道 (自用)",
+  "version": "0.0.4",
+  "main": "src/index.js",
+  "files": [
+    "src",
+    "package.json",
+    "readme.md"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "koishi",
+    "plugin",
+    "discord",
+    "truckersmp"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.18.7"
+  }
+}
