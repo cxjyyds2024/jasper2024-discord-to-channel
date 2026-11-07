@@ -24,25 +24,43 @@ const ANNOUNCEMENT_RESULT = Object.freeze({
 // 文本处理
 // ==========================================
 
+/**
+ * 统一换行符，兼容转义形式的换行文本
+ */
 function normalizeNewlines(text) {
-	return text ? text.replace(/\r\n/g, '\n') : text
-}
-
-function protectWhitespace(text) {
 	if (!text) return text
 
-	return text
-		.replace(/\n/g, '\u0001')
-		.replace(/ {2,}/g, match => `\u0002${match.length}\u0002`)
+	return String(text)
+		.replace(/\\r\\n/g, '\n')
+		.replace(/\\n/g, '\n')
+		.replace(/\r\n/g, '\n')
+		.replace(/\r/g, '\n')
 }
 
-function restoreWhitespace(text) {
-	if (!text) return text
+/**
+ * 根据原文结构重建翻译结果，保留 Markdown 和空白格式
+ */
+function rebuildTranslatedText(results) {
+	if (!Array.isArray(results)) return null
 
-	return text
-		.replace(/\u0001/g, '\n')
-		.replace(/\u0002(\d+)\u0002/g, (_, n) => ' '.repeat(Number(n)))
+	return results.map(item => {
+		const source = String(item.src ?? '')
+		const translated = String(item.dst ?? '')
+
+		// 保留原文空行
+		if (!source) return ''
+
+		// 提取原文行首、行尾空格
+		const leading = source.match(/^[ \t]*/)?.[0] ?? ''
+		const trailing = source.match(/[ \t]*$/)?.[0] ?? ''
+
+		// 使用译文内容，恢复原文空白格式
+		const content = translated.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '')
+
+		return leading + content + trailing
+	}).join('\n')
 }
+
 
 function stripLeadingTitle(text) {
 	if (!text) return text
@@ -51,7 +69,7 @@ function stripLeadingTitle(text) {
 
 	if (
 		lines.length &&
-		/^\s*\*\*TruckersMP\s*更新\s*[0-9.]+\*\*\s*$/i.test(lines[0])
+		/^\s*\**\s*TruckersMP\s*更新\s*[0-9.]+\s*\**\s*$/i.test(lines[0])
 	) {
 		lines.shift()
 
@@ -112,8 +130,8 @@ function buildGameVersions(row) {
  * - both：原文 + 中文译文
  */
 function buildContent(row, format) {
-	const original = stripLeadingTitle(row.announcementText || '')
-	const translated = stripLeadingTitle(row.translatedText || '')
+	const original = stripLeadingTitle( normalizeNewlines(row.announcementText || ''), )
+	const translated = stripLeadingTitle( normalizeNewlines(row.translatedText || ''), )
 
 	const lines = [
 		`# 📦 TruckersMP 更新 ${row.version ?? '(未知版本)'}`,
@@ -591,7 +609,7 @@ module.exports = {
 							`检测到版本变化：${previousVersion} → ${payload.name}`,
 						)
 					} else if (isFirstCheck) {
-						logger.info(`初始化当前版本基准：${payload.name}`)
+						logger.info(`当前版本：${payload.name}`)
 					} else if (isNewRecord) {
 						logger.info(`补充版本记录：${payload.name}`)
 					}
@@ -732,7 +750,8 @@ module.exports = {
 							appid,
 							from: 'auto',
 							to: 'zh',
-							q: protectWhitespace(text),
+							q: normalizeNewlines(text),
+							reference: '整段翻译，保留原本的 Markdown 格式、空格和换行符',
 						},
 						{
 							headers: {
@@ -742,14 +761,12 @@ module.exports = {
 						},
 					)
 
-					if (res?.error_code || !res?.trans_result) {
+					if (res?.error_code || !Array.isArray(res?.trans_result)) {
 						logger.error('百度翻译请求异常：%o', res)
 						return null
 					}
 
-					return restoreWhitespace(
-						res.trans_result.map(item => item.dst).join(''),
-					)
+					return rebuildTranslatedText(res.trans_result)
 				} catch (error) {
 					logger.error('百度翻译网络请求异常：%o', error)
 					return null
