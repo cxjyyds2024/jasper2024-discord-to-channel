@@ -69,7 +69,7 @@ function stripLeadingTitle(text) {
 
 	if (
 		lines.length &&
-		/^\s*\**\s*TruckersMP\s*更新\s*[0-9.]+\s*\**\s*$/i.test(lines[0])
+		/^\s*\**\s*TruckersMP\s*(?:Update|更新)\s*[0-9]+(?:\.[0-9]+)*\s*\**\s*$/i.test(lines[0])
 	) {
 		lines.shift()
 
@@ -124,12 +124,8 @@ function buildGameVersions(row) {
 
 /**
  * QQ 群公告 Markdown 内容
- *
- * format:
- * - translated：仅中文译文
- * - both：原文 + 中文译文
  */
-function buildContent(row, format) {
+function buildContent(row, includeOriginal) {
 	const original = stripLeadingTitle( normalizeNewlines(row.announcementText || ''), )
 	const translated = stripLeadingTitle( normalizeNewlines(row.translatedText || ''), )
 
@@ -149,7 +145,7 @@ function buildContent(row, format) {
 
 	lines.push('', '---', '')
 
-	const body = format === 'both'
+	const body = includeOriginal
 		? [
 			'## 📄 原始公告',
 			'',
@@ -161,7 +157,7 @@ function buildContent(row, format) {
 			'',
 			translated || '（暂无译文）',
 		].join('\n')
-		: (translated || original || '该版本暂无更新公告')
+		: (translated || '暂无中文译文')
 
 	return `${lines.join('\n')}\n${body}`
 }
@@ -204,6 +200,11 @@ module.exports = {
 	inject: ['http', 'database'],
 
 	Config: Schema.object({
+		// 测试推送命令
+		enableTestPush: Schema.boolean()
+			.default(false)
+			.description('是否启用测试推送命令'),
+
 		versionCheck: Schema.object({
 			enabled: Schema.boolean()
 				.default(true)
@@ -274,9 +275,9 @@ module.exports = {
 					.default([])
 					.description('目标群 openid 列表（非数字群号）'),
 
-				format: Schema.string()
-					.default('translated')
-					.description('发送内容：translated（仅译文）/ both（原文+译文）'),
+				includeOriginal: Schema.boolean()
+					.default(false)
+					.description('是否同时发送原始公告和中文译文'),
 			}).description('发送到群'),
 		}).description('公告检测'),
 	}),
@@ -787,7 +788,7 @@ module.exports = {
 
 				const content = buildContent(
 					row,
-					annConfig.sendTo.format,
+					annConfig.sendTo.includeOriginal,
 				)
 
 				if (!content.trim()) return
@@ -1303,7 +1304,7 @@ module.exports = {
 					: '暂无版本记录'
 			}
 
-			const content = buildContent(row, sendConfig.format)
+			const content = buildContent(row, sendConfig.includeOriginal,)
 
 			logger.info(
 				`开始 Markdown ${actionName}：版本 ${row.version}，目标群 ${groupOpenid}`,
@@ -1326,8 +1327,8 @@ module.exports = {
 			return handleMarkdownPush(version, '测试推送', session)
 		}
 
-		async function handleLatestAnnouncement(version, session) {
-			return handleMarkdownPush(version, '最新公告推送', session)
+		async function handleLatestAnnouncement(session) {
+			return handleMarkdownPush(null, '最新公告推送', session)
 		}
 
 		/**
@@ -1385,44 +1386,115 @@ module.exports = {
 			return lines.join('\n')
 		}
 
+
 		/**
-		 * 查询最近版本记录，最多显示 50 条。
+		 * 手动 Markdown 内容推送，只发送到当前命令所在群。
 		 */
-		async function handleVersionHistory(count) {
-			const limit = Math.max(
-				1,
-				Math.min(50, Number(count) || 10),
+		async function handleMarkdownContentPush(content, actionName, session) {
+			const annConfig = config.announcementCheck
+			const sendConfig = annConfig?.sendTo
+
+			if (!sendConfig?.enabled) {
+				return `${actionName}失败：请先启用 QQ 群发送功能`
+			}
+
+			const groupOpenid = session?.guildId?.trim()
+
+			if (!groupOpenid) {
+				return `${actionName}失败：请在 QQ 群内执行此命令`
+			}
+
+			logger.info(
+				`开始 Markdown ${actionName}，目标群 ${groupOpenid}`,
 			)
 
-			const rows = await ctx.database.get(
+			const results = await sendToGroups(
+				annConfig,
+				[groupOpenid],
+				content,
+			)
+
+			const success = results.filter(item => item.ok).length
+
+			if (success === 0) {
+				return `${actionName}失败，请查看日志`
+			}
+
+			logger.info(
+				`Markdown ${actionName}完成，成功 ${success} 个群`,
+			)
+		}		
+
+
+		/**
+		 * 查询最近 10 条版本记录，并通过 QQ Markdown 发送。
+		 */
+		async function handleVersionHistory(session) {
+			const limit = 10
+
+			const allRows = await ctx.database.get(
 				TABLE,
-				{ version: { $ne: null } },
+				{},
 				{
 					sort: { createdAt: 'desc' },
-					limit,
 				},
 			)
+
+			const rows = allRows
+				.filter(row => typeof row.version === 'string' && row.version.trim())
+				.slice(0, limit)
 
 			if (!rows.length) {
 				return '暂无版本记录'
 			}
 
-			const lines = rows.map((row, index) => {
-				const mark = row.announcementId
-					? '📢有公告'
-					: (
-						row.announcementChecked
-							? '📭无公告'
-							: '⏳检测中'
-					)
+			const groups = {
+				noAnnouncement: [],
+				noTranslation: [],
+				translated: [],
+			}
 
-				return `${String(index + 1).padStart(2, ' ')}. ${row.version ?? '(未知)'}  ${row.versionTimeUtc8 ?? '(无时间)'}  [${mark}]`
-			})
+			for (const row of rows) {
+				const hasOriginal = Boolean(row.announcementText?.trim())
+				const hasTranslation = Boolean(row.translatedText?.trim())
 
-			return [
-				`📅 最近 ${rows.length} 条版本记录：`,
-				...lines,
+				const time = row.versionTimeUtc8 || '时间未知'
+				const item = `${row.version} · ${time}`
+
+				if (!hasOriginal && !hasTranslation) {
+					groups.noAnnouncement.push(item)
+				} else if (hasOriginal && !hasTranslation) {
+					groups.noTranslation.push(item)
+				} else {
+					groups.translated.push(item)
+				}
+			}
+
+			const content = [
+				`# 📅 TruckersMP 历史版本`,
+				'',
+				`**📢 已有中文译文（${groups.translated.length}）**`,
+				...(groups.translated.length
+					? groups.translated.map(item => `\`${item}\``)
+					: ['暂无']),
+				'',
+				`**⚠️ 暂无中文译文（${groups.noTranslation.length}）**`,
+				...(groups.noTranslation.length
+					? groups.noTranslation.map(item => `\`${item}\``)
+					: ['暂无']),
+				'',
+				`**📭 暂无公告（${groups.noAnnouncement.length}）**`,
+				...(groups.noAnnouncement.length
+					? groups.noAnnouncement.map(item => `\`${item}\``)
+					: ['暂无']),
 			].join('\n')
+
+			// 复用现有 QQ 官方 Markdown 发送接口。
+			return handleMarkdownContentPush(
+				content,
+				'历史版本查询',
+				session,
+			)
 		}
 
 		// ==========================================
@@ -1433,43 +1505,66 @@ module.exports = {
 			'd2c',
 			'Discord 公告推送管理',
 		).action(() => {
-			return [
+			const commands = [
 				'📦 Discord 公告推送管理',
 				'',
 				'使用方法：',
-				'd2c 测试推送 [版本] - 测试 QQ 群推送',
-				'd2c 最新公告 [版本] - 推送最新公告',
-				'd2c 版本 [版本] - 查询版本信息',
-				'd2c 版本历史 [数量] - 查询版本历史',
-			].join('\n')
+			]
+
+			if (config.enableTestPush) {
+				commands.push(
+					'd2c 测试推送 [版本] - 测试 QQ 群推送',
+				)
+			}
+
+			commands.push(
+				'd2c 最新公告 - 推送数据库中的最新公告',
+				'd2c 历史公告 [版本] - 查询指定版本的历史公告',
+				'd2c 历史版本 - 查询最近 10 条版本记录',
+			)
+
+			return commands.join('\n')
+		})
+
+		if (config.enableTestPush) {
+			d2c.subcommand(
+				'.测试推送 [version:string]',
+				'测试推送',
+			).action(async ({ session }, version) => {
+				return handleTestPush(version, session)
+			})
+		}
+
+		d2c.subcommand(
+			'.最新公告',
+			'推送最新公告',
+			{ hidden: true },
+		).action(async ({ session }) => {
+			return handleLatestAnnouncement(session)
 		})
 
 		d2c.subcommand(
-			'.测试推送 [version:string]',
-			'测试推送',
+			'.历史公告 <version:string>',
+			'推送指定版本的历史公告',
+			{ hidden: true },
 		).action(async ({ session }, version) => {
-			return handleTestPush(version, session)
+			if (!version?.trim()) {
+				return '请指定版本号，例如：d2c 历史公告 0.7.10.0'
+			}
+
+			return handleMarkdownPush(
+				version,
+				'历史公告推送',
+				session,
+			)
 		})
 
 		d2c.subcommand(
-			'.最新公告 [version:string]',
-			'获取最新公告',
-		).action(async ({ session }, version) => {
-			return handleLatestAnnouncement(version, session)
-		})
-
-		d2c.subcommand(
-			'.版本 [version:string]',
-			'查询版本',
-		).action(async (_, version) => {
-			return handleVersion(version)
-		})
-
-		d2c.subcommand(
-			'.版本历史 [count:number]',
-			'查询版本历史',
-		).action(async (_, count) => {
-			return handleVersionHistory(count)
+			'.历史版本',
+			'查询历史版本记录',
+			{ hidden: true },
+		).action(async ({ session }) => {
+			return handleVersionHistory(session)
 		})
 	},
 }
