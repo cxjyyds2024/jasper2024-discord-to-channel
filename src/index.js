@@ -1,4 +1,6 @@
 const { Schema } = require('koishi')
+const MarkdownIt = require('markdown-it')
+const { ANNOUNCEMENT_CSS, HISTORY_CSS, MESSAGE_CSS, NOTIFICATION_CSS } = require('./styles')
 
 // ==========================================
 // 常量
@@ -11,6 +13,7 @@ const TABLE = 'truckersmp_update_messages'
 
 const HOURS_24 = 24 * 60 * 60 * 1000
 const CHECK_MINUTES = [10, 15, 20, 25, 30]
+const SLOW_CHECK_MINUTES = [60] // 30分钟后追加一次1小时的兜底检测
 const TOKEN_REFRESH_MARGIN = 60_000
 
 const ANNOUNCEMENT_RESULT = Object.freeze({
@@ -20,16 +23,26 @@ const ANNOUNCEMENT_RESULT = Object.freeze({
 	FAILED: 'failed',
 })
 
+const BRAND = Object.freeze({
+	announcement: 'TRUCKERSMP · 公告更新',
+	history: 'TRUCKERSMP · 历史版本',
+	notification: 'TRUCKERSMP · 新版本',
+	message: 'TRUCKERSMP · 消息通知',
+})
+
+const markdown = new MarkdownIt({
+	html: false,
+	breaks: true,
+	linkify: true,
+	typographer: true,
+})
+
 // ==========================================
-// 文本处理
+// 文本工具
 // ==========================================
 
-/**
- * 统一换行符，兼容转义形式的换行文本
- */
 function normalizeNewlines(text) {
 	if (!text) return text
-
 	return String(text)
 		.replace(/\\r\\n/g, '\n')
 		.replace(/\\n/g, '\n')
@@ -37,158 +50,326 @@ function normalizeNewlines(text) {
 		.replace(/\r/g, '\n')
 }
 
-/**
- * 根据原文结构重建翻译结果，保留 Markdown 和空白格式
- */
+function escapeHtml(value) {
+	return String(value ?? '').replace(/[&<>"']/g, char => ({
+		'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+	})[char])
+}
+
 function rebuildTranslatedText(results) {
 	if (!Array.isArray(results)) return null
-
 	return results.map(item => {
 		const source = String(item.src ?? '')
 		const translated = String(item.dst ?? '')
-
-		// 保留原文空行
 		if (!source) return ''
-
-		// 提取原文行首、行尾空格
 		const leading = source.match(/^[ \t]*/)?.[0] ?? ''
 		const trailing = source.match(/[ \t]*$/)?.[0] ?? ''
-
-		// 使用译文内容，恢复原文空白格式
 		const content = translated.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '')
-
 		return leading + content + trailing
 	}).join('\n')
 }
 
-
 function stripLeadingTitle(text) {
 	if (!text) return text
-
 	const lines = text.split('\n')
-
 	if (
 		lines.length &&
 		/^\s*\**\s*TruckersMP\s*(?:Update|更新)\s*[0-9]+(?:\.[0-9]+)*\s*\**\s*$/i.test(lines[0])
 	) {
 		lines.shift()
-
-		while (lines.length && !lines[0].trim()) {
-			lines.shift()
-		}
+		while (lines.length && !lines[0].trim()) lines.shift()
 	}
-
 	return lines.join('\n')
 }
 
 function extractVersion(content) {
 	if (!content) return null
-
-	const match = String(content).match(
-		/Update\s+([0-9]+(?:\.[0-9.]+)+)/i,
-	)
-
+	const match = String(content).match(/Update\s+([0-9]+(?:\.[0-9.]+)+)/i)
 	return match ? match[1] : null
 }
 
 function isWithin24h(timestamp) {
 	if (!timestamp) return false
-
 	const time = new Date(timestamp).getTime()
 	const diff = Date.now() - time
+	return (!Number.isNaN(time) && diff >= 0 && diff <= HOURS_24)
+}
 
-	return (
-		!Number.isNaN(time) &&
-		diff >= 0 &&
-		diff <= HOURS_24
-	)
+function formatHistoryDate(value) {
+	if (!value) return '时间未知'
+	if (value instanceof Date) {
+		const year = value.getFullYear()
+		const month = String(value.getMonth() + 1).padStart(2, '0')
+		const day = String(value.getDate()).padStart(2, '0')
+		const hour = String(value.getHours()).padStart(2, '0')
+		const minute = String(value.getMinutes()).padStart(2, '0')
+		const second = String(value.getSeconds()).padStart(2, '0')
+		return `${year}-${month}-${day} ${hour}:${minute}:${second}`
+	}
+	return String(value).replace('T', ' ').replace(/\.\d+Z?$/, '').slice(0, 19)
 }
 
 // ==========================================
-// 消息构建
+// Markdown 渲染
+// ==========================================
+
+function markdownToHtml(text) {
+	return markdown.render(normalizeNewlines(text || ''))
+}
+
+// ==========================================
+// 消息内容构建
 // ==========================================
 
 function buildGameVersions(row) {
 	const game = []
-
-	if (row.ets2Version) {
-		game.push(`ETS2 ${row.ets2Version}`)
-	}
-
-	if (row.atsVersion) {
-		game.push(`ATS ${row.atsVersion}`)
-	}
-
+	if (row.ets2Version) game.push(`ETS2 ${row.ets2Version}`)
+	if (row.atsVersion) game.push(`ATS ${row.atsVersion}`)
 	return game
 }
 
-/**
- * QQ 群公告 Markdown 内容
- */
 function buildContent(row, includeOriginal) {
-	const original = stripLeadingTitle( normalizeNewlines(row.announcementText || ''), )
-	const translated = stripLeadingTitle( normalizeNewlines(row.translatedText || ''), )
+	const original = stripLeadingTitle(normalizeNewlines(row.announcementText || ''))
+	const translated = stripLeadingTitle(normalizeNewlines(row.translatedText || ''))
 
-	const lines = [
-		`# 📦 TruckersMP 更新 ${row.version ?? '(未知版本)'}`,
-	]
-
-	if (row.versionTimeUtc8) {
-		lines.push(`> 🕐 时间：${row.versionTimeUtc8} (UTC+8)`)
-	}
+	const lines = [`# 📦 TruckersMP 更新 ${row.version ?? '(未知版本)'}`]
+	if (row.versionTimeUtc8) lines.push(`> 🕐 时间：${row.versionTimeUtc8} (UTC+8)`)
 
 	const game = buildGameVersions(row)
-
-	if (game.length) {
-		lines.push(`> 🎮 支持版本：${game.join(' · ')}`)
-	}
+	if (game.length) lines.push(`> 🎮 支持版本：${game.join(' · ')}`)
 
 	lines.push('', '---', '')
 
 	const body = includeOriginal
-		? [
-			'## 📄 原始公告',
-			'',
-			original || '（暂无原文）',
-			'',
-			'---',
-			'',
-			'## 🇨🇳 中文翻译',
-			'',
-			translated || '（暂无译文）',
-		].join('\n')
+		? ['## 📄 原始公告', '', original || '（暂无原文）', '', '---', '', '## 🇨🇳 中文翻译', '', translated || '（暂无译文）'].join('\n')
 		: (translated || '暂无中文译文')
 
 	return `${lines.join('\n')}\n${body}`
 }
 
-/**
- * TruckersMP 版本更新通知
- */
 function buildVersionNotification(row) {
-	const lines = [
-		'# 🚀 TruckersMP 检测到新版本',
-		'',
-		`📦 **新版本：${row.version ?? '(未知版本)'}**`,
-	]
-
-	if (row.oldVersion) {
-		lines.push(`⬅️ 旧版本：${row.oldVersion}`)
-	}
-
-	if (row.versionTimeUtc8) {
-		lines.push(`🕐 发布时间：${row.versionTimeUtc8} (UTC+8)`)
-	}
+	const lines = ['# 🚀 TruckersMP 检测到新版本', '', `📦 **新版本：${row.version ?? '(未知版本)'}**`]
+	if (row.oldVersion) lines.push(`⬅️ 旧版本：${row.oldVersion}`)
+	if (row.versionTimeUtc8) lines.push(`🕐 发布时间：${row.versionTimeUtc8} (UTC+8)`)
 
 	const game = buildGameVersions(row)
-
-	if (game.length) {
-		lines.push(`🎮 支持版本：${game.join(' · ')}`)
-	}
+	if (game.length) lines.push(`🎮 支持版本：${game.join(' · ')}`)
 
 	lines.push('', '请注意检查游戏版本更新。')
-
 	return lines.join('\n')
+}
+
+function buildHistoryVersionMarkdown(rows) {
+	const hasTranslation = rows.filter(row => row.translatedText?.trim())
+	const noTranslation = rows.filter(row => row.announcementText?.trim() && !row.translatedText?.trim())
+	const noAnnouncement = rows.filter(row => !row.announcementText?.trim() && !row.translatedText?.trim())
+
+	function buildList(list) {
+		if (!list.length) return '暂无数据'
+		return list.map(row => `- **${row.version}**　${formatHistoryDate(row.versionTimeUtc8 || row.createdAt)}`).join('\n')
+	}
+
+	return [
+		'# 📅 TruckersMP 历史版本', '',
+		`## 🌐 已有中文译文 (${hasTranslation.length})`, buildList(hasTranslation), '',
+		`## ⚠️ 暂无中文译文 (${noTranslation.length})`, buildList(noTranslation), '',
+		`## 📢 暂无公告 (${noAnnouncement.length})`, buildList(noAnnouncement),
+	].join('\n')
+}
+
+// ==========================================
+// HTML 模板
+// ==========================================
+
+function buildVersionNotificationHtml(row) {
+	const gameVersions = buildGameVersions(row)
+	const versionMap = {}
+	for (const item of gameVersions) {
+		const match = item.match(/^(ETS2|ATS)\s+(.+)$/)
+		if (match) versionMap[match[1]] = match[2]
+	}
+
+	const gameHtml = [
+		{ key: 'ETS2', label: 'EURO TRUCK SIMULATOR 2' },
+		{ key: 'ATS', label: 'AMERICAN TRUCK SIMULATOR' },
+	]
+		.filter(game => versionMap[game.key])
+		.map(game => `
+            <div class="game-card">
+                <div class="game-name">${game.label}</div>
+                <div class="game-version">${escapeHtml(versionMap[game.key])}</div>
+            </div>
+        `).join('')
+
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><style>${NOTIFICATION_CSS}</style></head>
+<body>
+    <article class="card">
+        <header class="header">
+            <div class="brand">${escapeHtml(BRAND.notification)}</div>
+            <div class="version-box">
+                <div class="new-version">${escapeHtml(row.version || '未知版本')}</div>
+                ${row.oldVersion ? `<div class="old-version">${escapeHtml(row.oldVersion)}</div>` : ''}
+            </div>
+            <div class="time">🕐 发布时间：${escapeHtml(row.versionTimeUtc8 || '未知时间')} (UTC+8)</div>
+        </header>
+        <main class="body">
+            ${gameHtml ? `<div class="section-title">支持游戏版本</div><div class="game-list">${gameHtml}</div>` : ''}
+            <div class="footer-note">🚀 检测到新版本，请及时更新游戏客户端。</div>
+        </main>
+    </article>
+</body>
+</html>`
+}
+
+function formatAnnouncementMarkdown(text) {
+	return normalizeNewlines(text || '')
+		.replace(/^\s*(?:\*\*)?([【\[][^】\]]+[】\]])(?:\*\*)?\s*$/gm, '**$1**')
+		.replace(/\[([a-f0-9]{8,})\]/gi, '`[$1]`')
+		.replace(/^(\s*)-(?=\S)/gm, '$1- ')
+}
+
+function renderAnnouncementContent(text) {
+	return markdownToHtml(formatAnnouncementMarkdown(text))
+		.replace(/<p>\s*<strong>[【\[](.+?)[】\]]<\/strong>\s*<\/p>/g, '<div class="category-tag">$1</div>')
+		.replace(/<p>\s*<strong>(欧洲卡车模拟2|美国卡车模拟)<\/strong>\s*<\/p>/g, '<h3>$1</h3>')
+}
+
+function buildAnnouncementHtml(row, includeOriginal) {
+	const original = stripLeadingTitle(normalizeNewlines(row.announcementText || ''))
+	const translated = stripLeadingTitle(normalizeNewlines(row.translatedText || ''))
+
+	const sections = includeOriginal
+		? [
+			{ title: '原始公告', content: original || '暂无原文' },
+			{ title: '中文翻译', content: translated || '暂无译文' },
+		]
+		: [{ title: '更新内容', content: translated || original || '暂无公告内容' }]
+
+	const sectionHtml = sections.map(section => `
+        <section class="notice-section">
+            <div class="section-heading"><span class="heading-bar"></span><span>${escapeHtml(section.title)}</span></div>
+            <div class="content">${renderAnnouncementContent(section.content)}</div>
+        </section>
+    `).join('')
+
+	const gameVersions = buildGameVersions(row)
+	const versionMap = {}
+	for (const item of gameVersions) {
+		const match = item.match(/^(ETS2|ATS)\s+(.+)$/)
+		if (match) versionMap[match[1]] = match[2]
+	}
+
+	const gameHtml = [
+		{ key: 'ETS2', className: 'ets2', label: 'EURO TRUCK SIMULATOR 2' },
+		{ key: 'ATS', className: 'ats', label: 'AMERICAN TRUCK SIMULATOR' },
+	]
+		.filter(game => versionMap[game.key])
+		.map(game => `
+            <div class="game-card ${game.className}">
+                <div class="game-name">${game.label}</div>
+                <div class="game-version">${escapeHtml(versionMap[game.key])}</div>
+            </div>
+        `).join('')
+
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><style>${ANNOUNCEMENT_CSS}</style></head>
+<body>
+    <article class="card">
+        <header class="header">
+            <div class="brand">${escapeHtml(BRAND.announcement)}</div>
+            <div class="version">${escapeHtml(row.version || '未知版本')}</div>
+            <div class="time">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="9"></circle>
+                    <path d="M12 7v5l3 2"></path>
+                </svg>
+                <span>${escapeHtml(row.versionTimeUtc8 || '未知时间')} (UTC+8)</span>
+            </div>
+        </header>
+        <main class="main">
+            <section class="block">
+                <div class="block-title">支持游戏版本</div>
+                <div class="game-list">${gameHtml || '<div class="game-empty">暂无游戏版本信息</div>'}</div>
+            </section>
+            <section class="block">${sectionHtml}</section>
+        </main>
+    </article>
+</body>
+</html>`
+}
+
+function buildHistoryVersionHtml(rows) {
+	const hasTranslation = rows.filter(row => row.translatedText?.trim())
+	const noTranslation = rows.filter(row => row.announcementText?.trim() && !row.translatedText?.trim())
+	const noAnnouncement = rows.filter(row => !row.announcementText?.trim() && !row.translatedText?.trim())
+
+	function renderList(list) {
+		if (!list.length) return ''
+		return `
+            <div class="version-list">
+                ${list.map(row => `
+                    <div class="version-item">
+                        <span class="version">${escapeHtml(row.version)}</span>
+                        <span class="date">${escapeHtml(formatHistoryDate(row.versionTimeUtc8 || row.createdAt))}</span>
+                    </div>
+                `).join('')}
+            </div>
+        `
+	}
+
+	function renderSection(title, icon, count, type, list) {
+		if (count === 0) return ''
+		return `
+            <section class="section">
+                <div class="section-title">
+                    <div class="section-name">
+                        <span class="icon">${icon}</span>
+                        <span>${title}</span>
+                    </div>
+                    <span class="count ${type}">${count}</span>
+                </div>
+                ${renderList(list)}
+            </section>
+        `
+	}
+
+	const isEmpty = hasTranslation.length === 0 && noTranslation.length === 0 && noAnnouncement.length === 0
+	const emptyHtml = isEmpty ? '<div class="empty-global">暂无任何版本记录</div>' : ''
+
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><style>${HISTORY_CSS}</style></head>
+<body>
+    <main class="container">
+        <header class="header">
+            <span class="brand">${escapeHtml(BRAND.history)}</span>
+            <h1 class="title">TruckersMP 历史版本</h1>
+        </header>
+        <main class="content">
+            ${emptyHtml}
+            ${renderSection('已有中文译文', '🌐', hasTranslation.length, 'success', hasTranslation)}
+            ${renderSection('暂无中文译文', '⚠️', noTranslation.length, 'warning', noTranslation)}
+            ${renderSection('暂无公告', '📢', noAnnouncement.length, 'muted', noAnnouncement)}
+        </main>
+    </main>
+</body>
+</html>`
+}
+
+function buildMessageHtml(content, brand = BRAND.message) {
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><style>${MESSAGE_CSS}</style></head>
+<body>
+    <article class="card">
+        <header class="header"><div class="brand">${escapeHtml(brand)}</div></header>
+        <main class="content">${markdownToHtml(content)}</main>
+    </article>
+</body>
+</html>`
 }
 
 // ==========================================
@@ -197,99 +378,47 @@ function buildVersionNotification(row) {
 
 module.exports = {
 	name: 'discord-to-channel',
-	inject: ['http', 'database'],
+	inject: ['http', 'database', 'puppeteer'],
 
 	Config: Schema.object({
-		// 测试推送命令
-		enableTestPush: Schema.boolean()
-			.default(false)
-			.description('是否启用测试推送命令'),
-
+		enableTestPush: Schema.boolean().default(false).description('是否启用测试推送命令'),
 		versionCheck: Schema.object({
-			enabled: Schema.boolean()
-				.default(true)
-				.description('启用 TruckersMP 版本检测'),
-
-			interval: Schema.number()
-				.default(10)
-				.min(0)
-				.description('轮询间隔（单位：分钟）。设为 0 则仅在启动时检测一次'),
-
-			notifyUpdate: Schema.boolean()
-				.default(false)
-				.description('检测到新版本时，向所有目标群发送版本更新通知'),
+			enabled: Schema.boolean().default(true).description('启用 TruckersMP 版本检测'),
+			interval: Schema.number().default(10).min(0).description('轮询间隔（单位：分钟）。设为 0 则仅在启动时检测一次'),
+			notifyUpdate: Schema.boolean().default(false).description('检测到新版本时，向所有目标群发送版本更新通知'),
 		}).description('版本检测'),
-
 		announcementCheck: Schema.object({
-			enabled: Schema.boolean()
-				.default(false)
-				.description('启用 Discord 公告检测（由版本更新触发）'),
-
-			proxyPrefix: Schema.string()
-				.description('代理前缀'),
-
-			proxyToken: Schema.string()
-				.description('代理服务鉴权 token'),
-
-			apiBase: Schema.string()
-				.default('https://discord.com/api/v10')
-				.description('Discord API 基础地址'),
-
-			channelId: Schema.string()
-				.description('公告频道 ID'),
-
-			discordToken: Schema.string()
-				.description('Discord Bot token（Authorization: Bot <token>）'),
-
-			limit: Schema.number()
-				.default(1)
-				.min(1)
-				.description('每次拉取条数'),
-
+			enabled: Schema.boolean().default(false).description('启用 Discord 公告检测（由版本更新触发）'),
+			proxyPrefix: Schema.string().description('代理前缀'),
+			proxyToken: Schema.string().description('代理服务鉴权 token'),
+			apiBase: Schema.string().default('https://discord.com/api/v10').description('Discord API 基础地址'),
+			channelId: Schema.string().description('公告频道 ID'),
+			discordToken: Schema.string().description('Discord Bot token（Authorization: Bot <token>）'),
+			limit: Schema.number().default(1).min(1).description('每次拉取条数'),
 			translate: Schema.object({
-				enabled: Schema.boolean()
-					.default(false)
-					.description('启用百度翻译'),
-
-				apiKey: Schema.string()
-					.description('百度翻译 API Key（Authorization: Bearer）'),
-
-				appid: Schema.string()
-					.description('百度翻译 APPID'),
+				enabled: Schema.boolean().default(false).description('启用百度翻译'),
+				appid: Schema.string().description('百度翻译 APPID'),
+				apiKey: Schema.string().description('百度翻译 API Key（Authorization: Bearer）'),
 			}).description('公告翻译'),
-
 			qq: Schema.object({
-				appId: Schema.string()
-					.description('QQ 机器人 AppID'),
-
-				clientSecret: Schema.string()
-					.description('QQ 机器人 ClientSecret'),
+				appId: Schema.string().description('QQ 机器人 AppID'),
+				clientSecret: Schema.string().description('QQ 机器人 ClientSecret'),
 			}).description('QQ 官方接口凭证'),
-
 			sendTo: Schema.object({
-				enabled: Schema.boolean()
-					.default(false)
-					.description('启用发送公告到 QQ 群'),
-
-				channels: Schema.array(Schema.string())
-					.default([])
-					.description('目标群 openid 列表（非数字群号）'),
-
-				includeOriginal: Schema.boolean()
-					.default(false)
-					.description('是否同时发送原始公告和中文译文'),
+				enabled: Schema.boolean().default(false).description('启用发送公告到 QQ 群'),
+				channels: Schema.array(Schema.string()).default([]).description('目标群 openid 列表（非数字群号）'),
+				format: Schema.union([
+					Schema.const('image').description('图片'),
+					Schema.const('markdown').description('Markdown 文字'),
+				]).default('markdown').description('消息发送格式'),
+				includeOriginal: Schema.boolean().default(false).description('是否同时发送原始公告和中文译文'),
 			}).description('发送到群'),
 		}).description('公告检测'),
 	}),
 
 	apply(ctx, config) {
 		const logger = ctx.logger('discord-to-channel')
-
 		let announcementApi = null
-
-		// ==========================================
-		// 数据库
-		// ==========================================
 
 		ctx.model.extend(TABLE, {
 			id: 'unsigned',
@@ -305,123 +434,48 @@ module.exports = {
 			announcementChecked: 'boolean',
 			createdAt: 'timestamp',
 			updatedAt: 'timestamp',
-		}, {
-			autoInc: true,
-			unique: ['version', 'announcementId'],
-		})
+		}, { autoInc: true, unique: ['version', 'announcementId'] })
 
 		async function findLatestRow() {
-			const rows = await ctx.database.get(
-				TABLE,
-				{},
-				{
-					sort: { createdAt: 'desc' },
-					limit: 1,
-				},
-			)
-
+			const rows = await ctx.database.get(TABLE, {}, { sort: { createdAt: 'desc' }, limit: 1 })
 			return rows[0] ?? null
 		}
 
 		async function findRowByVersion(version) {
-			const rows = await ctx.database.get(
-				TABLE,
-				{ version },
-				{ limit: 1 },
-			)
-
+			const rows = await ctx.database.get(TABLE, { version }, { limit: 1 })
 			return rows[0] ?? null
 		}
 
 		function getUniqueChannels(channels = []) {
-			return [
-				...new Set(
-					channels
-						.map(item => typeof item === 'string' ? item.trim() : '')
-						.filter(Boolean),
-				),
-			]
+			return [...new Set(channels.map(item => typeof item === 'string' ? item.trim() : '').filter(Boolean))]
 		}
 
-		// ==========================================
-		// QQ 消息发送
-		// ==========================================
+		const tokenCache = { token: null, expiresAt: 0, fetching: null }
 
-		const tokenCache = {
-			token: null,
-			expiresAt: 0,
-			fetching: null,
-		}
-
-		/**
-		 * 获取 QQ Access Token。
-		 * fetching 用于合并并发刷新请求。
-		 */
 		async function getAccessToken(qq) {
 			const now = Date.now()
-
-			if (
-				tokenCache.token &&
-				now < tokenCache.expiresAt - TOKEN_REFRESH_MARGIN
-			) {
-				return tokenCache.token
-			}
-
+			if (tokenCache.token && now < tokenCache.expiresAt - TOKEN_REFRESH_MARGIN) return tokenCache.token
 			if (tokenCache.fetching) {
 				const token = await tokenCache.fetching
-
 				if (token) return token
-
-				if (
-					tokenCache.token &&
-					Date.now() < tokenCache.expiresAt
-				) {
-					return tokenCache.token
-				}
-
+				if (tokenCache.token && Date.now() < tokenCache.expiresAt) return tokenCache.token
 				return null
 			}
 
 			tokenCache.fetching = (async () => {
 				try {
-					const res = await ctx.http.post(
-						`${QQ_API_BASE}/app/getAppAccessToken`,
-						{
-							appId: qq.appId,
-							clientSecret: qq.clientSecret,
-						},
-					)
-
+					const res = await ctx.http.post(`${QQ_API_BASE}/app/getAppAccessToken`, { appId: qq.appId, clientSecret: qq.clientSecret })
 					if (res?.code || !res?.access_token) {
 						logger.error('获取 access_token 失败或异常：%o', res)
-
-						if (
-							tokenCache.token &&
-							Date.now() < tokenCache.expiresAt
-						) {
-							logger.warn('新 Token 获取失败，继续使用尚未过期的旧 Token')
-							return tokenCache.token
-						}
-
+						if (tokenCache.token && Date.now() < tokenCache.expiresAt) return tokenCache.token
 						return null
 					}
-
 					tokenCache.token = res.access_token
-					tokenCache.expiresAt =
-						Date.now() + (res.expires_in || 7200) * 1000
-
+					tokenCache.expiresAt = Date.now() + (res.expires_in || 7200) * 1000
 					return tokenCache.token
 				} catch (error) {
 					logger.error('获取 access_token 请求异常：%o', error)
-
-					if (
-						tokenCache.token &&
-						Date.now() < tokenCache.expiresAt
-					) {
-						logger.warn('Token 刷新请求失败，继续使用尚未过期的旧 Token')
-						return tokenCache.token
-					}
-
+					if (tokenCache.token && Date.now() < tokenCache.expiresAt) return tokenCache.token
 					return null
 				} finally {
 					tokenCache.fetching = null
@@ -431,232 +485,172 @@ module.exports = {
 			return tokenCache.fetching
 		}
 
-		/**
-		 * QQ 官方群 Markdown 发送入口。
-		 * channels 中保存的是群 OpenID。
-		 */
-		async function sendToGroups(options, channels, content) {
+		async function sendImageToGroup(options, groupOpenid, imageBuffer) {
 			const qq = options.qq
-
-			if (!qq?.appId || !qq?.clientSecret) {
-				return channels.map(group => ({
-					group,
-					ok: false,
-					error: '缺少 QQ 凭证',
-				}))
-			}
-
+			if (!qq?.appId || !qq?.clientSecret) throw new Error('缺少 QQ 机器人凭证')
 			const token = await getAccessToken(qq)
+			if (!token) throw new Error('获取 access_token 失败')
+			const headers = { Authorization: `QQBot ${token}`, 'Content-Type': 'application/json' }
+			const baseUrl = `${QQ_API_BASE}/v2/groups/${encodeURIComponent(groupOpenid)}`
+			const upload = await ctx.http.post(`${baseUrl}/files`, { file_type: 1, file_data: imageBuffer.toString('base64'), srv_send_msg: false }, { headers })
+			if (!upload?.file_info) throw new Error(`图片上传未返回 file_info：${JSON.stringify(upload)}`)
+			await ctx.http.post(`${baseUrl}/messages`, { msg_type: 7, content: ' ', media: { file_info: upload.file_info } }, { headers })
+		}
 
-			if (!token) {
-				return channels.map(group => ({
-					group,
-					ok: false,
-					error: '获取 access_token 失败',
-				}))
-			}
-
+		async function sendToGroups(options, channels, content, createImage = null) {
 			const results = []
+			const useImage = options.sendTo?.format === 'image'
+			const qq = options.qq
+			const hasCredentials = Boolean(qq?.appId && qq?.clientSecret)
 
-			for (const groupOpenid of channels) {
+			let imageBuffer = null
+			if (useImage) {
 				try {
-					await ctx.http.post(
-						`${QQ_API_BASE}/v2/groups/${encodeURIComponent(groupOpenid)}/messages`,
-						{
-							msg_type: 2,
-							markdown: { content },
-						},
-						{
-							headers: {
-								Authorization: `QQBot ${token}`,
-								'Content-Type': 'application/json',
-							},
-						},
-					)
-
-					results.push({
-						group: groupOpenid,
-						ok: true,
-					})
-
-					logger.info(`Markdown 消息已发送到群 ${groupOpenid}`)
+					imageBuffer = createImage ? await createImage() : await buildMessageImage(content)
 				} catch (error) {
-					const errorData = error.response?.data || error.message
-
-					results.push({
-						group: groupOpenid,
-						ok: false,
-						error: errorData,
-					})
-
-					logger.error(
-						`Markdown 消息发送到群 ${groupOpenid} 失败：%o`,
-						errorData,
-					)
+					logger.warn('消息图片生成失败，回退 Markdown：%o', error.response?.data || error.message)
 				}
 			}
 
+			for (const groupOpenid of channels) {
+				if (imageBuffer) {
+					try {
+						await sendImageToGroup(options, groupOpenid, imageBuffer)
+						results.push({ group: groupOpenid, ok: true, type: 'image' })
+						logger.info(`图片消息已发送到群 ${groupOpenid}`)
+						continue
+					} catch (error) {
+						logger.warn(`图片发送到群 ${groupOpenid} 失败，回退 Markdown：%o`, error.response?.data || error.message)
+					}
+				}
+
+				if (!hasCredentials) {
+					results.push({ group: groupOpenid, ok: false, error: '缺少 QQ 凭证' })
+					continue
+				}
+
+				try {
+					const token = await getAccessToken(qq)
+					if (!token) throw new Error('获取 access_token 失败')
+					await ctx.http.post(`${QQ_API_BASE}/v2/groups/${encodeURIComponent(groupOpenid)}/messages`, { msg_type: 2, markdown: { content } }, { headers: { Authorization: `QQBot ${token}`, 'Content-Type': 'application/json' } })
+					results.push({ group: groupOpenid, ok: true, type: 'markdown' })
+					logger.info(`Markdown 消息已发送到群 ${groupOpenid}`)
+				} catch (error) {
+					const errorData = error.response?.data || error.message
+					results.push({ group: groupOpenid, ok: false, error: errorData })
+					logger.error(`Markdown 消息发送到群 ${groupOpenid} 失败：%o`, errorData)
+				}
+			}
 			return results
 		}
 
-		// ==========================================
-		// TruckersMP 版本检测
-		// ==========================================
+		async function renderHtmlToPng(html, viewportWidth) {
+			const page = await ctx.puppeteer.page()
+			try {
+				await page.setViewport({ width: viewportWidth, height: 200, deviceScaleFactor: 1 })
+				await page.setContent(html, { waitUntil: 'domcontentloaded' })
+				await page.evaluate(async () => { await document.fonts.ready })
+				const contentHeight = await page.evaluate(() => {
+					const body = document.body
+					const root = document.documentElement
+					return Math.max(body.scrollHeight, body.offsetHeight, root.clientHeight, root.scrollHeight, root.offsetHeight)
+				})
+				await page.setViewport({ width: viewportWidth, height: contentHeight, deviceScaleFactor: 1 })
+				return await page.screenshot({ type: 'png', fullPage: true })
+			} finally {
+				await page.close()
+			}
+		}
+
+		function buildAnnouncementImage(row, includeOriginal) {
+			return renderHtmlToPng(buildAnnouncementHtml(row, includeOriginal), 1200)
+		}
+
+		function buildMessageImage(content, brand) {
+			return renderHtmlToPng(buildMessageHtml(content, brand), 1200)
+		}
+
+		function buildVersionNotificationImage(row) {
+			return renderHtmlToPng(buildVersionNotificationHtml(row), 1000)
+		}
+
+		function buildHistoryVersionImage(rows) {
+			return renderHtmlToPng(buildHistoryVersionHtml(rows), 880)
+		}
 
 		function setupVersionCheck(versionConfig, annApi, annConfig) {
 			let versionChecking = false
-
-			// 插件运行期间的版本基准，首次成功获取时初始化。
 			let baselineVersion = null
 
 			async function fetchVersionInfo() {
 				if (versionChecking) return
-
 				versionChecking = true
-
 				try {
 					const payload = await ctx.http.get(VERSION_API_ENDPOINT)
-
-					if (!payload?.name || !payload?.time) {
-						throw new Error('接口返回数据异常')
-					}
-
+					if (!payload?.name || !payload?.time) throw new Error('接口返回数据异常')
 					const rawTime = String(payload.time).trim()
-
-					const isoTime = /[TZ]/.test(rawTime)
-						? rawTime
-						: rawTime.replace(' ', 'T') + 'Z'
-
+					const isoTime = /[TZ]/.test(rawTime) ? rawTime : rawTime.replace(' ', 'T') + 'Z'
 					const utcDate = new Date(isoTime)
+					if (Number.isNaN(utcDate.getTime())) throw new Error('UTC 时间格式错误')
+					const formattedTimeUTC8 = new Intl.DateTimeFormat('zh-CN', {
+						timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+						hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+					}).format(utcDate).replace(/\//g, '-')
 
-					if (Number.isNaN(utcDate.getTime())) {
-						throw new Error('UTC 时间格式错误')
-					}
-
-					const formattedTimeUTC8 = new Intl.DateTimeFormat(
-						'zh-CN',
-						{
-							timeZone: 'Asia/Shanghai',
-							year: 'numeric',
-							month: '2-digit',
-							day: '2-digit',
-							hour: '2-digit',
-							minute: '2-digit',
-							second: '2-digit',
-							hour12: false,
-						},
-					).format(utcDate).replace(/\//g, '-')
-
-					logger.info(
-						`版本 ${payload.name}｜${formattedTimeUTC8}｜ETS2 ${payload.supported_game_version}｜ATS ${payload.supported_ats_game_version}`,
-					)
+					logger.info(`版本 ${payload.name}｜${formattedTimeUTC8}｜ETS2 ${payload.supported_game_version}｜ATS ${payload.supported_ats_game_version}`)
 
 					const isFirstCheck = baselineVersion === null
 					const previousVersion = baselineVersion
-
-					// 版本变化以运行期间的检测结果为准，不依赖数据库是否已有记录。
-					const versionChanged =
-						!isFirstCheck &&
-						previousVersion !== payload.name
-
-					const existing = await ctx.database.get(
-						TABLE,
-						{ version: payload.name },
-						{ limit: 1 },
-					)
+					const versionChanged = !isFirstCheck && previousVersion !== payload.name
+					const existing = await ctx.database.get(TABLE, { version: payload.name }, { limit: 1 })
 
 					let isNewRecord = false
-
 					const patch = {
-						versionTimeUtc: payload.time,
-						versionTimeUtc8: formattedTimeUTC8,
-						ets2Version: payload.supported_game_version,
-						atsVersion: payload.supported_ats_game_version,
+						versionTimeUtc: payload.time, versionTimeUtc8: formattedTimeUTC8,
+						ets2Version: payload.supported_game_version, atsVersion: payload.supported_ats_game_version,
 						updatedAt: new Date(),
 					}
 
 					if (existing.length) {
 						const row = existing[0]
-
-						// 已有版本记录时，只补充缺失的旧版本信息。
-						if (versionChanged && !row.oldVersion) {
-							patch.oldVersion = previousVersion
-						}
-
+						if (versionChanged && !row.oldVersion) patch.oldVersion = previousVersion
 						await ctx.database.set(TABLE, row.id, patch)
 					} else {
 						isNewRecord = true
-
 						await ctx.database.create(TABLE, {
-							version: payload.name,
-							oldVersion: versionChanged
-								? previousVersion
-								: null,
-							versionTimeUtc: payload.time,
-							versionTimeUtc8: formattedTimeUTC8,
-							ets2Version: payload.supported_game_version,
-							atsVersion: payload.supported_ats_game_version,
-							announcementChecked: false,
-							createdAt: new Date(),
-							updatedAt: new Date(),
+							version: payload.name, oldVersion: versionChanged ? previousVersion : null,
+							versionTimeUtc: payload.time, versionTimeUtc8: formattedTimeUTC8,
+							ets2Version: payload.supported_game_version, atsVersion: payload.supported_ats_game_version,
+							announcementChecked: false, createdAt: new Date(), updatedAt: new Date(),
 						})
 					}
 
-					// 数据库同步成功后更新基准，避免重复通知。
 					baselineVersion = payload.name
 
-					if (versionChanged) {
-						logger.info(
-							`检测到版本变化：${previousVersion} → ${payload.name}`,
-						)
-					} else if (isFirstCheck) {
-						logger.info(`当前版本：${payload.name}`)
-					} else if (isNewRecord) {
-						logger.info(`补充版本记录：${payload.name}`)
-					}
+					if (versionChanged) logger.info(`检测到版本变化：${previousVersion} → ${payload.name}`)
+					else if (isFirstCheck) logger.info(`当前版本：${payload.name}`)
+					else if (isNewRecord) logger.info(`补充版本记录：${payload.name}`)
 
-					// 版本更新通知：首次启动不发送。
 					if (versionChanged && versionConfig.notifyUpdate) {
-						const channels = getUniqueChannels(
-							annConfig?.sendTo?.channels,
-						)
-
-						if (
-							annConfig?.sendTo?.enabled &&
-							channels.length
-						) {
+						const channels = getUniqueChannels(annConfig?.sendTo?.channels)
+						if (annConfig?.sendTo?.enabled && channels.length) {
 							const content = buildVersionNotification({
-								version: payload.name,
-								oldVersion: previousVersion,
-								versionTimeUtc8: formattedTimeUTC8,
-								ets2Version: payload.supported_game_version,
-								atsVersion: payload.supported_ats_game_version,
+								version: payload.name, oldVersion: previousVersion, versionTimeUtc8: formattedTimeUTC8,
+								ets2Version: payload.supported_game_version, atsVersion: payload.supported_ats_game_version,
 							})
-
-							logger.info(
-								`开始发送版本更新通知：${previousVersion} → ${payload.name}，目标群 ${channels.length} 个`,
-							)
-
-							const results = await sendToGroups(
-								annConfig,
-								channels,
-								content,
-							)
-
+							logger.info(`开始发送版本更新通知：${previousVersion} → ${payload.name}，目标群 ${channels.length} 个`)
+							const results = await sendToGroups(annConfig, channels, content, () => buildVersionNotificationImage({
+								version: payload.name, oldVersion: previousVersion, versionTimeUtc8: formattedTimeUTC8,
+								ets2Version: payload.supported_game_version, atsVersion: payload.supported_ats_game_version,
+							}))
 							const success = results.filter(item => item.ok).length
 							const failed = results.length - success
-
-							logger.info(
-								`版本更新通知发送完成：成功 ${success} 个群，失败 ${failed} 个群`,
-							)
+							logger.info(`版本更新通知发送完成：成功 ${success} 个群，失败 ${failed} 个群`)
 						} else {
-							logger.warn(
-								'版本更新通知已开启，但 QQ 群发送未启用或没有配置目标群',
-							)
+							logger.warn('版本更新通知已开启，但 QQ 群发送未启用或没有配置目标群')
 						}
 					}
 
-					// 首次建立版本记录或检测到版本变化时，安排公告检测。
 					if ((isNewRecord || versionChanged) && annApi) {
 						logger.info(`触发公告检测：${payload.name}`)
 						annApi.scheduleAnnouncementChecks(payload.name)
@@ -668,26 +662,23 @@ module.exports = {
 				}
 			}
 
-			// 启动时立即检测一次。
 			fetchVersionInfo()
-
-			if (versionConfig.interval > 0) {
-				ctx.setInterval(
-					fetchVersionInfo,
-					versionConfig.interval * 60 * 1000,
-				)
-			}
+			if (versionConfig.interval > 0) ctx.setInterval(fetchVersionInfo, versionConfig.interval * 60 * 1000)
 		}
-
-		// ==========================================
-		// Discord 公告检测
-		// ==========================================
 
 		function setupAnnouncementCheck(annConfig) {
 			const pendingTimers = new Map()
 			const doneVersions = new Set()
 			const completedResults = new Map()
 			const checkingVersions = new Map()
+
+			// 记录每个版本的实时检测进度
+			const progressCache = new Map()
+
+			// 对外暴露的获取进度方法
+			function getVersionProgress(targetVersion) {
+				return progressCache.get(targetVersion) ?? null
+			}
 
 			function clearTimersFor(version) {
 				const timers = pendingTimers.get(version)
@@ -776,6 +767,7 @@ module.exports = {
 
 			/**
 			 * 自动公告推送：向全部配置群发送。
+			 * 与手动「最新公告 / 历史公告」使用同一公告模板，品牌一致。
 			 */
 			async function sendAnnouncement(row) {
 				if (!annConfig.sendTo?.enabled) return
@@ -793,7 +785,8 @@ module.exports = {
 
 				if (!content.trim()) return
 
-				await sendToGroups(annConfig, channels, content)
+				await sendToGroups(annConfig, channels, content,
+					() => buildAnnouncementImage(row, annConfig.sendTo.includeOriginal))
 			}
 
 			/**
@@ -1056,7 +1049,7 @@ module.exports = {
 			}
 
 			/**
-			 * 安排五轮公告检测，间隔由 CHECK_MINUTES 控制。
+			 * 安排高频检测与 1 小时兜底检测。
 			 */
 			function scheduleAnnouncementChecks(targetVersion) {
 				if (!targetVersion || doneVersions.has(targetVersion)) {
@@ -1084,7 +1077,7 @@ module.exports = {
 							activeTask
 						) {
 							logger.info(
-								`版本 ${targetVersion} 第五轮检测时已有任务执行，等待当前任务完成`,
+								`版本 ${targetVersion} 最后一轮检测时已有任务执行，等待当前任务完成`,
 							)
 
 							try {
@@ -1104,6 +1097,7 @@ module.exports = {
 								logger.info(
 									`版本 ${targetVersion} 已找到公告，检测结束`,
 								)
+								progressCache.delete(targetVersion)
 								return
 
 							case ANNOUNCEMENT_RESULT.NOT_FOUND:
@@ -1131,7 +1125,7 @@ module.exports = {
 										)
 
 										logger.info(
-											`版本 ${targetVersion} 五轮检测完成，确认无更新公告`,
+											`版本 ${targetVersion} 所有轮次检测完成，确认无更新公告`,
 										)
 									} else if (rows.length) {
 										await ctx.database.set(
@@ -1148,6 +1142,7 @@ module.exports = {
 										targetVersion,
 										ANNOUNCEMENT_RESULT.NOT_FOUND,
 									)
+									progressCache.delete(targetVersion)
 								}
 
 								return
@@ -1165,8 +1160,9 @@ module.exports = {
 
 								if (isLast) {
 									logger.error(
-										`版本 ${targetVersion} 五轮检测结束，但仍无法确认公告状态，保留未确认状态，等待后续处理`,
+										`版本 ${targetVersion} 所有轮次检测结束，但仍无法确认公告状态，保留未确认状态，等待后续处理`,
 									)
+									progressCache.delete(targetVersion)
 								}
 
 								return
@@ -1179,14 +1175,32 @@ module.exports = {
 					}
 				}
 
-				CHECK_MINUTES.forEach((min, index) => {
+				// 将短期高频轮询与 1 小时兜底合并
+				const allChecks = [...CHECK_MINUTES, ...SLOW_CHECK_MINUTES]
+				const totalRounds = allChecks.length
+
+				// 刚触发时的初始进度
+				progressCache.set(targetVersion, {
+					currentRound: 1,
+					totalRounds,
+					nextMinutes: allChecks[0],
+					nextTimeText: `下次将在 ${allChecks[0]} 分钟后`,
+				})
+
+				allChecks.forEach((min, index) => {
 					const timer = setTimeout(() => {
 						timers.delete(timer)
+						
+						// 每轮触发时更新当前进度
+						const isLast = index === totalRounds - 1
+						progressCache.set(targetVersion, {
+							currentRound: index + 1,
+							totalRounds,
+							nextMinutes: isLast ? 0 : allChecks[index + 1],
+							nextTimeText: isLast ? '最后一轮' : `下次将在 ${allChecks[index + 1]} 分钟后`,
+						})
 
-						runCheck(
-							index,
-							index === CHECK_MINUTES.length - 1,
-						)
+						runCheck(index, isLast)
 					}, min * 60 * 1000)
 
 					timers.add(timer)
@@ -1201,142 +1215,105 @@ module.exports = {
 				}
 
 				pendingTimers.clear()
+				progressCache.clear()
 			})
 
 			return {
 				scheduleAnnouncementChecks,
+				getVersionProgress,
 			}
 		}
 
-		// ==========================================
-		// 生命周期
-		// ==========================================
-
 		ctx.on('ready', async () => {
 			if (config.announcementCheck.enabled) {
-				announcementApi = setupAnnouncementCheck(
-					config.announcementCheck,
-				)
-
+				announcementApi = setupAnnouncementCheck(config.announcementCheck)
 				try {
-					// 恢复重启前尚未完成的公告检测。
-					const rows = await ctx.database.get(
-						TABLE,
-						{
-							announcementChecked: false,
-							version: { $ne: null },
-						},
-					)
-
+					const rows = await ctx.database.get(TABLE, { announcementChecked: false, version: { $ne: null } })
 					for (const row of rows) {
 						if (row.announcementId) {
-							await ctx.database.set(
-								TABLE,
-								row.id,
-								{
-									announcementChecked: true,
-									updatedAt: new Date(),
-								},
-							)
-
-							logger.info(
-								`版本 ${row.version} 已有公告记录，跳过重启补检测`,
-							)
-
+							await ctx.database.set(TABLE, row.id, { announcementChecked: true, updatedAt: new Date() })
+							logger.info(`版本 ${row.version} 已有公告记录，跳过重启补检测`)
 							continue
 						}
-
-						logger.info(
-							`重启补调度公告检测：${row.version}`,
-						)
-
-						announcementApi.scheduleAnnouncementChecks(
-							row.version,
-						)
+						logger.info(`重启补调度公告检测：${row.version}`)
+						announcementApi.scheduleAnnouncementChecks(row.version)
 					}
 				} catch (error) {
-					logger.error(
-						'重启补调度公告检测失败：%o',
-						error,
-					)
+					logger.error('重启补调度公告检测失败：%o', error)
 				}
 			}
 
 			if (config.versionCheck.enabled) {
-				setupVersionCheck(
-					config.versionCheck,
-					announcementApi,
-					config.announcementCheck,
-				)
+				setupVersionCheck(config.versionCheck, announcementApi, config.announcementCheck)
 			}
 		})
 
-		// ==========================================
-		// 指令处理
-		// ==========================================
-
-		/**
-		 * 手动 Markdown 推送只发送到当前命令所在群。
-		 */
 		async function handleMarkdownPush(version, actionName, session) {
 			const annConfig = config.announcementCheck
 			const sendConfig = annConfig?.sendTo
-
-			if (!sendConfig?.enabled) {
-				return `${actionName}失败：请先启用 QQ 群发送功能`
-			}
+			if (!sendConfig?.enabled) return `${actionName}失败：请先启用 QQ 群发送功能`
 
 			const groupOpenid = session?.guildId?.trim()
-
-			if (!groupOpenid) {
-				return `${actionName}失败：请在 QQ 群内执行此命令`
-			}
+			if (!groupOpenid) return `${actionName}失败：请在 QQ 群内执行此命令`
 
 			const targetVersion = version?.trim()
+			const row = targetVersion ? await findRowByVersion(targetVersion) : await findLatestRow()
+			if (!row) return targetVersion ? `未找到版本 ${targetVersion} 的记录` : '暂无版本记录'
 
-			const row = targetVersion
-				? await findRowByVersion(targetVersion)
-				: await findLatestRow()
-
-			if (!row) {
-				return targetVersion
-					? `未找到版本 ${targetVersion} 的记录`
-					: '暂无版本记录'
-			}
-
-			const content = buildContent(row, sendConfig.includeOriginal,)
-
-			logger.info(
-				`开始 Markdown ${actionName}：版本 ${row.version}，目标群 ${groupOpenid}`,
-			)
-
-			const results = await sendToGroups(
-				annConfig,
-				[groupOpenid],
-				content,
-			)
-
+			const content = buildContent(row, sendConfig.includeOriginal)
+			logger.info(`开始 Markdown ${actionName}：版本 ${row.version}，目标群 ${groupOpenid}`)
+			const results = await sendToGroups(annConfig, [groupOpenid], content, () => buildAnnouncementImage(row, sendConfig.includeOriginal))
 			const success = results.filter(item => item.ok).length
-
-			logger.info(
-				`Markdown ${actionName}完成：版本 ${row.version}，成功 ${success} 个群`,
-			)
+			logger.info(`Markdown ${actionName}完成：版本 ${row.version}，成功 ${success} 个群`)
 		}
 
 		async function handleTestPush(version, session) {
-			return handleMarkdownPush(version, '测试推送', session)
+			const annConfig = config.announcementCheck
+			const sendConfig = annConfig?.sendTo
+			if (!sendConfig?.enabled) return '测试推送失败：请先启用 QQ 群发送功能'
+
+			const groupOpenid = session?.guildId?.trim()
+			if (!groupOpenid) return '测试推送失败：请在 QQ 群内执行此命令'
+
+			const targetVersion = version?.trim()
+			const row = targetVersion ? await findRowByVersion(targetVersion) : await findLatestRow()
+			if (!row) return targetVersion ? `未找到版本 ${targetVersion} 的记录` : '暂无版本记录'
+
+			const content = buildContent(row, sendConfig.includeOriginal)
+			logger.info(`开始测试推送：版本 ${row.version}，目标群 ${groupOpenid}，发送格式 ${sendConfig.format}`)
+
+			const results = await sendToGroups(annConfig, [groupOpenid], content, () => buildAnnouncementImage(row, sendConfig.includeOriginal))
+			if (!results.some(item => item.ok)) return '测试推送失败，请查看日志'
+			logger.info(`测试推送完成：版本 ${row.version}`)
 		}
 
 		async function handleLatestAnnouncement(session) {
 			return handleMarkdownPush(null, '最新公告推送', session)
 		}
 
-		/**
-		 * 查询单个版本信息。
-		 */
-		async function handleVersion(version) {
-			const targetVersion = version?.trim()
+		async function handleHistoryAnnouncement(version, session) {
+			const annConfig = config.announcementCheck
+			const sendConfig = annConfig?.sendTo
+			if (!sendConfig?.enabled) return '历史公告推送失败：请先启用 QQ 群发送功能'
 
+			const groupOpenid = session?.guildId?.trim()
+			if (!groupOpenid) return '历史公告推送失败：请在 QQ 群内执行此命令'
+
+			const targetVersion = version?.trim()
+			if (!targetVersion) return '请指定版本号，例如：d2c 历史公告 0.7.10.0'
+
+			const row = await findRowByVersion(targetVersion)
+			if (!row) return `未找到版本 ${targetVersion} 的记录`
+
+			const content = buildContent(row, sendConfig.includeOriginal)
+			logger.info(`开始历史公告推送：版本 ${row.version}，目标群 ${groupOpenid}，发送格式 ${sendConfig.format}`)
+			const results = await sendToGroups(annConfig, [groupOpenid], content, () => buildAnnouncementImage(row, sendConfig.includeOriginal))
+			if (!results.some(item => item.ok)) return '历史公告推送失败，请查看日志'
+			logger.info(`历史公告推送完成：版本 ${row.version}`)
+		}
+
+		async function handleAnnouncementStatus(version, session) {
+			const targetVersion = version?.trim()
 			const row = targetVersion
 				? await findRowByVersion(targetVersion)
 				: await findLatestRow()
@@ -1347,224 +1324,116 @@ module.exports = {
 					: '暂无任何版本记录'
 			}
 
-			const lines = [
-				`📦 TruckersMP 更新 ${row.version ?? '(未知版本)'}`,
-			]
-
-			if (row.oldVersion) {
-				lines.push(`⬅️ 上一版本：${row.oldVersion}`)
-			}
-
-			if (row.versionTimeUtc8) {
-				lines.push(
-					`🕐 发布时间：${row.versionTimeUtc8} (UTC+8)`,
-				)
-			}
-
-			if (row.versionTimeUtc) {
-				lines.push(
-					`🌐 UTC 时间：${row.versionTimeUtc}`,
-				)
-			}
-
-			const game = buildGameVersions(row)
-
-			if (game.length) {
-				lines.push(
-					`🎮 支持版本：${game.join(' · ')}`,
-				)
-			}
-
+			// 1. 判断公告状态
+			let statusText = ''
 			if (row.announcementId) {
-				lines.push('📢 公告状态：已发布')
+				statusText = '✅ 已获取公告（已完成）'
 			} else if (row.announcementChecked) {
-				lines.push('📭 公告状态：该版本无公告')
+				statusText = '📭 确认无公告（已完成）'
 			} else {
-				lines.push('⏳ 公告状态：检测中')
+				statusText = '⏳ 检测中...'
 			}
 
-			return lines.join('\n')
-		}
-
-
-		/**
-		 * 手动 Markdown 内容推送，只发送到当前命令所在群。
-		 */
-		async function handleMarkdownContentPush(content, actionName, session) {
-			const annConfig = config.announcementCheck
-			const sendConfig = annConfig?.sendTo
-
-			if (!sendConfig?.enabled) {
-				return `${actionName}失败：请先启用 QQ 群发送功能`
-			}
-
-			const groupOpenid = session?.guildId?.trim()
-
-			if (!groupOpenid) {
-				return `${actionName}失败：请在 QQ 群内执行此命令`
-			}
-
-			logger.info(
-				`开始 Markdown ${actionName}，目标群 ${groupOpenid}`,
-			)
-
-			const results = await sendToGroups(
-				annConfig,
-				[groupOpenid],
-				content,
-			)
-
-			const success = results.filter(item => item.ok).length
-
-			if (success === 0) {
-				return `${actionName}失败，请查看日志`
-			}
-
-			logger.info(
-				`Markdown ${actionName}完成，成功 ${success} 个群`,
-			)
-		}		
-
-
-		/**
-		 * 查询最近 10 条版本记录，并通过 QQ Markdown 发送。
-		 */
-		async function handleVersionHistory(session) {
-			const limit = 10
-
-			const allRows = await ctx.database.get(
-				TABLE,
-				{},
-				{
-					sort: { createdAt: 'desc' },
-				},
-			)
-
-			const rows = allRows
-				.filter(row => typeof row.version === 'string' && row.version.trim())
-				.slice(0, limit)
-
-			if (!rows.length) {
-				return '暂无版本记录'
-			}
-
-			const groups = {
-				noAnnouncement: [],
-				noTranslation: [],
-				translated: [],
-			}
-
-			for (const row of rows) {
-				const hasOriginal = Boolean(row.announcementText?.trim())
-				const hasTranslation = Boolean(row.translatedText?.trim())
-
-				const time = row.versionTimeUtc8 || '时间未知'
-				const item = `${row.version} · ${time}`
-
-				if (!hasOriginal && !hasTranslation) {
-					groups.noAnnouncement.push(item)
-				} else if (hasOriginal && !hasTranslation) {
-					groups.noTranslation.push(item)
-				} else {
-					groups.translated.push(item)
+			// 2. 判断当前运行到第几轮，以及下一次触发的时间
+			let progressText = ''
+			if (announcementApi) {
+				const progressInfo = announcementApi.getVersionProgress(row.version)
+				if (progressInfo) {
+					let nextText = progressInfo.nextTimeText
+					if (progressInfo.nextMinutes > 0) {
+						const nextDate = new Date(Date.now() + progressInfo.nextMinutes * 60 * 1000)
+						const hh = String(nextDate.getHours()).padStart(2, '0')
+						const mm = String(nextDate.getMinutes()).padStart(2, '0')
+						const ss = String(nextDate.getSeconds()).padStart(2, '0')
+						nextText = `下次触发：${hh}:${mm}:${ss}`
+					}
+					progressText = `第 ${progressInfo.currentRound} / ${progressInfo.totalRounds} 轮 (${nextText})`
 				}
 			}
 
-			const content = [
-				`# 📅 TruckersMP 历史版本`,
-				'',
-				`**📢 已有中文译文（${groups.translated.length}）**`,
-				...(groups.translated.length
-					? groups.translated.map(item => `\`${item}\``)
-					: ['暂无']),
-				'',
-				`**⚠️ 暂无中文译文（${groups.noTranslation.length}）**`,
-				...(groups.noTranslation.length
-					? groups.noTranslation.map(item => `\`${item}\``)
-					: ['暂无']),
-				'',
-				`**📭 暂无公告（${groups.noAnnouncement.length}）**`,
-				...(groups.noAnnouncement.length
-					? groups.noAnnouncement.map(item => `\`${item}\``)
-					: ['暂无']),
-			].join('\n')
-
-			// 复用现有 QQ 官方 Markdown 发送接口。
-			return handleMarkdownContentPush(
-				content,
-				'历史版本查询',
-				session,
-			)
-		}
-
-		// ==========================================
-		// 指令注册
-		// ==========================================
-
-		const d2c = ctx.command(
-			'd2c',
-			'Discord 公告推送管理',
-		).action(() => {
-			const commands = [
-				'📦 Discord 公告推送管理',
-				'',
-				'使用方法：',
-			]
-
-			if (config.enableTestPush) {
-				commands.push(
-					'd2c 测试推送 [版本] - 测试 QQ 群推送',
-				)
+			if (!progressText) {
+				if (row.announcementId) {
+					progressText = '无需检测'
+				} else if (row.announcementChecked) {
+					progressText = '检测已结束'
+				} else {
+					progressText = '等待触发或已过期'
+				}
 			}
 
+			return [
+				`📦 版本：${row.version}`,
+				`🕐 发布：${row.versionTimeUtc8 || '未知时间'} (UTC+8)`,
+				`📢 状态：${statusText}`,
+				`🔄 进度：${progressText}`,
+			].join('\n')
+		}
+
+		async function handleMarkdownContentPush(content, actionName, session) {
+			const annConfig = config.announcementCheck
+			const sendConfig = annConfig?.sendTo
+			if (!sendConfig?.enabled) return `${actionName}失败：请先启用 QQ 群发送功能`
+
+			const groupOpenid = session?.guildId?.trim()
+			if (!groupOpenid) return `${actionName}失败：请在 QQ 群内执行此命令`
+
+			logger.info(`开始 Markdown ${actionName}，目标群 ${groupOpenid}`)
+			const results = await sendToGroups(annConfig, [groupOpenid], content, () => buildMessageImage(content, BRAND.message))
+			const success = results.filter(item => item.ok).length
+			if (success === 0) return `${actionName}失败，请查看日志`
+			logger.info(`Markdown ${actionName}完成，成功 ${success} 个群`)
+		}
+
+		async function handleVersionHistory(session) {
+			const annConfig = config.announcementCheck
+			const sendConfig = annConfig?.sendTo
+			if (!sendConfig?.enabled) return '历史版本发送失败：请先启用 QQ 群发送功能'
+
+			const groupOpenid = session?.guildId?.trim()
+			if (!groupOpenid) return '历史版本发送失败：请在 QQ 群内执行此命令'
+
+			const rows = await ctx.database.get(TABLE, {}, { sort: { versionTimeUtc: 'desc' }, limit: 10 })
+			if (!rows.length) return '暂无版本记录'
+
+			const content = buildHistoryVersionMarkdown(rows)
+			logger.info(`开始历史版本推送：共 ${rows.length} 条，目标群 ${groupOpenid}，发送格式 ${sendConfig.format}`)
+			const results = await sendToGroups(annConfig, [groupOpenid], content, () => buildHistoryVersionImage(rows))
+			if (!results.some(item => item.ok)) return '历史版本发送失败，请查看日志'
+			logger.info(`历史版本推送完成：共 ${rows.length} 条`)
+		}
+
+		const d2c = ctx.command('d2c', 'Discord 公告推送管理').action(() => {
+			const commands = ['📦 Discord 公告推送管理', '', '使用方法：']
+			if (config.enableTestPush) commands.push('d2c 测试推送 [版本] - 测试 QQ 群推送')
 			commands.push(
 				'd2c 最新公告 - 推送数据库中的最新公告',
 				'd2c 历史公告 [版本] - 查询指定版本的历史公告',
 				'd2c 历史版本 - 查询最近 10 条版本记录',
 			)
-
 			return commands.join('\n')
 		})
 
 		if (config.enableTestPush) {
-			d2c.subcommand(
-				'.测试推送 [version:string]',
-				'测试推送',
-			).action(async ({ session }, version) => {
+			d2c.subcommand('.测试推送 [version:string]', '测试推送').action(async ({ session }, version) => {
 				return handleTestPush(version, session)
 			})
 		}
 
-		d2c.subcommand(
-			'.最新公告',
-			'推送最新公告',
-			{ hidden: true },
-		).action(async ({ session }) => {
+		d2c.subcommand('.最新公告', '推送最新公告', { hidden: true }).action(async ({ session }) => {
 			return handleLatestAnnouncement(session)
 		})
 
-		d2c.subcommand(
-			'.历史公告 <version:string>',
-			'推送指定版本的历史公告',
-			{ hidden: true },
-		).action(async ({ session }, version) => {
-			if (!version?.trim()) {
-				return '请指定版本号，例如：d2c 历史公告 0.7.10.0'
-			}
-
-			return handleMarkdownPush(
-				version,
-				'历史公告推送',
-				session,
-			)
+		d2c.subcommand('.历史公告 <version:string>', '推送指定版本的历史公告', { hidden: true }).action(async ({ session }, version) => {
+			if (!version?.trim()) return '请指定版本号，例如：d2c 历史公告 0.7.10.0'
+			return handleHistoryAnnouncement(version, session)
 		})
 
-		d2c.subcommand(
-			'.历史版本',
-			'查询历史版本记录',
-			{ hidden: true },
-		).action(async ({ session }) => {
+		d2c.subcommand('.历史版本', '查询历史版本记录', { hidden: true }).action(async ({ session }) => {
 			return handleVersionHistory(session)
+		})
+
+		d2c.subcommand('.公告检测状态 [version:string]', '查看公告抓取的实时进度', { hidden: true }).action(async ({ session }, version) => {
+			return handleAnnouncementStatus(version, session)
 		})
 	},
 }
