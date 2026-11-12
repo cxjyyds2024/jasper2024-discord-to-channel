@@ -190,14 +190,16 @@ function buildVersionNotificationHtml(row) {
 	}
 
 	const gameHtml = [
-		{ key: 'ETS2', label: 'EURO TRUCK SIMULATOR 2' },
-		{ key: 'ATS', label: 'AMERICAN TRUCK SIMULATOR' },
+		{ key: 'ETS2', className: 'ets2', label: 'EURO TRUCK SIMULATOR 2' },
+		{ key: 'ATS', className: 'ats', label: 'AMERICAN TRUCK SIMULATOR' },
 	]
 		.filter(game => versionMap[game.key])
 		.map(game => `
-            <div class="game-card">
-                <div class="game-name">${game.label}</div>
-                <div class="game-version">${escapeHtml(versionMap[game.key])}</div>
+            <div class="game-card bubble ${game.className}">
+                <div class="game-info">
+                    <div class="game-name">${game.label}</div>
+                    <div class="game-version">${escapeHtml(versionMap[game.key])}</div>
+                </div>
             </div>
         `).join('')
 
@@ -205,18 +207,28 @@ function buildVersionNotificationHtml(row) {
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><style>${NOTIFICATION_CSS}</style></head>
 <body>
-    <article class="card">
+    <article class="card bubble">
         <header class="header">
             <div class="brand">${escapeHtml(BRAND.notification)}</div>
+            
             <div class="version-box">
                 <div class="new-version">${escapeHtml(row.version || '未知版本')}</div>
-                ${row.oldVersion ? `<div class="old-version">${escapeHtml(row.oldVersion)}</div>` : ''}
+                ${row.oldVersion ? `<div class="old-version">旧版本：${escapeHtml(row.oldVersion)}</div>` : ''}
             </div>
-            <div class="time">🕐 发布时间：${escapeHtml(row.versionTimeUtc8 || '未知时间')} (UTC+8)</div>
+            
+            <div class="time-text">
+                更新时间 ${escapeHtml(row.versionTimeUtc8 || '未知时间')} (UTC+8)
+            </div>
         </header>
+
         <main class="body">
-            ${gameHtml ? `<div class="section-title">支持游戏版本</div><div class="game-list">${gameHtml}</div>` : ''}
-            <div class="footer-note">🚀 检测到新版本，请及时更新游戏客户端。</div>
+            ${gameHtml ? `
+            <div class="section-title">支持游戏版本</div>
+            <div class="game-list">${gameHtml}</div>
+            ` : ''}
+            <div class="footer-note bubble">
+                <span>🚀 检测到新版本，请及时更新游戏客户端。</span>
+            </div>
         </main>
     </article>
 </body>
@@ -248,7 +260,7 @@ function buildAnnouncementHtml(row, includeOriginal) {
 		: [{ title: '更新内容', content: translated || original || '暂无公告内容' }]
 
 	const sectionHtml = sections.map(section => `
-        <section class="notice-section">
+        <section class="notice-wrapper bubble">
             <div class="section-heading"><span class="heading-bar"></span><span>${escapeHtml(section.title)}</span></div>
             <div class="content">${renderAnnouncementContent(section.content)}</div>
         </section>
@@ -267,7 +279,7 @@ function buildAnnouncementHtml(row, includeOriginal) {
 	]
 		.filter(game => versionMap[game.key])
 		.map(game => `
-            <div class="game-card ${game.className}">
+            <div class="game-card bubble ${game.className}">
                 <div class="game-name">${game.label}</div>
                 <div class="game-version">${escapeHtml(versionMap[game.key])}</div>
             </div>
@@ -277,24 +289,22 @@ function buildAnnouncementHtml(row, includeOriginal) {
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><style>${ANNOUNCEMENT_CSS}</style></head>
 <body>
-    <article class="card">
+    <article class="card bubble">
         <header class="header">
             <div class="brand">${escapeHtml(BRAND.announcement)}</div>
-            <div class="version">${escapeHtml(row.version || '未知版本')}</div>
-            <div class="time">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="12" cy="12" r="9"></circle>
-                    <path d="M12 7v5l3 2"></path>
-                </svg>
-                <span>${escapeHtml(row.versionTimeUtc8 || '未知时间')} (UTC+8)</span>
+            <!-- 版本号 -->
+            <div class="new-version">${escapeHtml(row.version || '未知版本')}</div>
+            <!-- 时间紧贴版本号下方，极简灰字 -->
+            <div class="time-text">
+                更新时间 ${escapeHtml(row.versionTimeUtc8 || '未知时间')} (UTC+8)
             </div>
         </header>
+        
         <main class="main">
-            <section class="block">
-                <div class="block-title">支持游戏版本</div>
-                <div class="game-list">${gameHtml || '<div class="game-empty">暂无游戏版本信息</div>'}</div>
-            </section>
-            <section class="block">${sectionHtml}</section>
+            <div class="game-wrapper">
+                ${gameHtml || '<div class="game-card bubble" style="flex:1; justify-content:center; color:#64748b;">暂无游戏版本信息</div>'}
+            </div>
+            ${sectionHtml}
         </main>
     </article>
 </body>
@@ -311,7 +321,7 @@ function buildHistoryVersionHtml(rows) {
 		return `
             <div class="version-list">
                 ${list.map(row => `
-                    <div class="version-item">
+                    <div class="version-item bubble">
                         <span class="version">${escapeHtml(row.version)}</span>
                         <span class="date">${escapeHtml(formatHistoryDate(row.versionTimeUtc8 || row.createdAt))}</span>
                     </div>
@@ -343,7 +353,7 @@ function buildHistoryVersionHtml(rows) {
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><style>${HISTORY_CSS}</style></head>
 <body>
-    <main class="container">
+    <main class="container bubble">
         <header class="header">
             <span class="brand">${escapeHtml(BRAND.history)}</span>
             <h1 class="title">TruckersMP 历史版本</h1>
@@ -364,7 +374,7 @@ function buildMessageHtml(content, brand = BRAND.message) {
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><style>${MESSAGE_CSS}</style></head>
 <body>
-    <article class="card">
+    <article class="card bubble">
         <header class="header"><div class="brand">${escapeHtml(brand)}</div></header>
         <main class="content">${markdownToHtml(content)}</main>
     </article>
@@ -382,6 +392,7 @@ module.exports = {
 
 	Config: Schema.object({
 		enableTestPush: Schema.boolean().default(false).description('是否启用测试推送命令'),
+		enableForceFetch: Schema.boolean().default(false).description('是否启用强制拉取测试命令（默认隐藏）'),
 		versionCheck: Schema.object({
 			enabled: Schema.boolean().default(true).description('启用 TruckersMP 版本检测'),
 			interval: Schema.number().default(10).min(0).description('轮询间隔（单位：分钟）。设为 0 则仅在启动时检测一次'),
@@ -1160,8 +1171,17 @@ module.exports = {
 
 								if (isLast) {
 									logger.error(
-										`版本 ${targetVersion} 所有轮次检测结束，但仍无法确认公告状态，保留未确认状态，等待后续处理`,
+										`版本 ${targetVersion} 所有轮次检测结束，且网络请求失败。强制标记为已检查，避免状态卡死`,
 									)
+									// 新增兜底：即使失败了，也把状态改为已检查，防止一直卡在“检测中”
+									const rows = await ctx.database.get(TABLE, { version: targetVersion }, { limit: 1 })
+									if (rows.length && !rows[0].announcementId) {
+										await ctx.database.set(TABLE, rows[0].id, {
+											announcementChecked: true,
+											updatedAt: new Date(),
+										})
+									}
+									markDone(targetVersion, ANNOUNCEMENT_RESULT.FAILED)
 									progressCache.delete(targetVersion)
 								}
 
@@ -1221,6 +1241,7 @@ module.exports = {
 			return {
 				scheduleAnnouncementChecks,
 				getVersionProgress,
+				fetchAnnouncements,
 			}
 		}
 
@@ -1235,8 +1256,18 @@ module.exports = {
 							logger.info(`版本 ${row.version} 已有公告记录，跳过重启补检测`)
 							continue
 						}
-						logger.info(`重启补调度公告检测：${row.version}`)
-						announcementApi.scheduleAnnouncementChecks(row.version)
+						
+						// 如果距离上次更新已经超过 1.5 小时，说明是之前卡死的残留任务
+						if (Date.now() - new Date(row.updatedAt).getTime() > 1.5 * 60 * 60 * 1000) {
+							logger.info(`版本 ${row.version} 检测已超时，重启时立即执行一次补拉`)
+							announcementApi.fetchAnnouncements(row.version).catch(err => {
+								logger.error(`重启救场补拉版本 ${row.version} 公告失败：%o`, err)
+							})
+						} else {
+							// 如果是刚触发不久的任务（比如刚更新完插件重启），则恢复常规定时器
+							logger.info(`重启恢复常规公告检测调度：${row.version}`)
+							announcementApi.scheduleAnnouncementChecks(row.version)
+						}
 					}
 				} catch (error) {
 					logger.error('重启补调度公告检测失败：%o', error)
@@ -1314,7 +1345,7 @@ module.exports = {
 
 		async function handleAnnouncementStatus(version, session) {
 			const targetVersion = version?.trim()
-			const row = targetVersion
+			let row = targetVersion
 				? await findRowByVersion(targetVersion)
 				: await findLatestRow()
 
@@ -1326,16 +1357,46 @@ module.exports = {
 
 			// 1. 判断公告状态
 			let statusText = ''
+			let progressText = ''
+
 			if (row.announcementId) {
 				statusText = '✅ 已获取公告（已完成）'
 			} else if (row.announcementChecked) {
 				statusText = '📭 确认无公告（已完成）'
 			} else {
 				statusText = '⏳ 检测中...'
+				
+				// 判断是否超时（比如超过1小时）
+				const updateTime = new Date(row.updatedAt).getTime()
+				if (Date.now() - updateTime > 1 * 60 * 60 * 1000) {
+					statusText = '⚠️ 检测异常超时，正在为您尝试补拉一次公告...'
+					
+					// 立刻发起拉取，并阻塞等待结果，直接反馈给用户
+					if (announcementApi) {
+						try {
+							// 覆盖内存中的 doneVersions 状态，强制重新拉取
+							const result = await announcementApi.fetchAnnouncements(row.version)
+							
+							if (result === ANNOUNCEMENT_RESULT.FOUND) {
+								statusText = '✅ 补拉成功，公告已保存并推送！'
+								row = await findRowByVersion(row.version) // 重新获取最新数据库状态
+							} else if (result === ANNOUNCEMENT_RESULT.NOT_FOUND) {
+								statusText = '📭 补拉完成，暂未发现公告，请稍后再试。'
+								// 更新数据库，避免一直卡在检测中
+								await ctx.database.set(TABLE, row.id, { announcementChecked: true, updatedAt: new Date() })
+								row = { ...row, announcementChecked: true }
+							} else {
+								statusText = '⚠️ 补拉请求失败或受到网络限制，请稍后再试。'
+							}
+						} catch (err) {
+							logger.error(`手动补拉版本 ${row.version} 失败：%o`, err)
+							statusText = '⚠️ 补拉过程出现异常，请查看日志。'
+						}
+					}
+				}
 			}
 
 			// 2. 判断当前运行到第几轮，以及下一次触发的时间
-			let progressText = ''
 			if (announcementApi) {
 				const progressInfo = announcementApi.getVersionProgress(row.version)
 				if (progressInfo) {
@@ -1357,7 +1418,7 @@ module.exports = {
 				} else if (row.announcementChecked) {
 					progressText = '检测已结束'
 				} else {
-					progressText = '等待触发或已过期'
+					progressText = '等待触发或已过期（如需立刻检测，请重新发送命令）'
 				}
 			}
 
@@ -1367,6 +1428,43 @@ module.exports = {
 				`📢 状态：${statusText}`,
 				`🔄 进度：${progressText}`,
 			].join('\n')
+		}
+
+
+		async function handleForceFetch(version, session) {
+			const targetVersion = version?.trim()
+			const row = targetVersion ? await findRowByVersion(targetVersion) : await findLatestRow()
+
+			if (!row) {
+				return targetVersion ? `未找到版本 ${targetVersion} 的记录` : '暂无任何版本记录'
+			}
+
+			if (!announcementApi) {
+				return '公告检测模块未启用，请检查配置。'
+			}
+
+			if (row.announcementId) {
+				return `版本 ${row.version} 已有公告，无需强制拉取。`
+			}
+
+			logger.info(`收到手动强制拉取请求：版本 ${row.version}`)
+
+			try {
+				const result = await announcementApi.fetchAnnouncements(row.version)
+				
+				if (result === ANNOUNCEMENT_RESULT.FOUND) {
+					return `✅ 版本 ${row.version} 强制拉取成功，公告已保存并推送！`
+				} else if (result === ANNOUNCEMENT_RESULT.NOT_FOUND) {
+					return `📭 版本 ${row.version} 拉取完成，但未找到对应公告。`
+				} else if (result === ANNOUNCEMENT_RESULT.FAILED) {
+					return `⚠️ 版本 ${row.version} 拉取失败，请检查网络或代理配置。`
+				} else {
+					return `⏳ 版本 ${row.version} 当前已有拉取任务在执行中，请稍后查看状态。`
+				}
+			} catch (error) {
+				logger.error(`手动强制拉取版本 ${row.version} 异常：%o`, error)
+				return `⚠️ 拉取过程异常，请查看控制台日志。`
+			}
 		}
 
 		async function handleMarkdownContentPush(content, actionName, session) {
@@ -1409,6 +1507,7 @@ module.exports = {
 				'd2c 最新公告 - 推送数据库中的最新公告',
 				'd2c 历史公告 [版本] - 查询指定版本的历史公告',
 				'd2c 历史版本 - 查询最近 10 条版本记录',
+				'd2c 公告检测状态 [版本] - 查看公告抓取的实时进度',
 			)
 			return commands.join('\n')
 		})
@@ -1435,5 +1534,11 @@ module.exports = {
 		d2c.subcommand('.公告检测状态 [version:string]', '查看公告抓取的实时进度', { hidden: true }).action(async ({ session }, version) => {
 			return handleAnnouncementStatus(version, session)
 		})
+
+		if (config.enableForceFetch) {
+			d2c.subcommand('.强制拉取 [version:string]', '手动强制拉取指定版本的公告', { hidden: true }).action(async ({ session }, version) => {
+				return handleForceFetch(version, session)
+			})
+		}
 	},
 }
